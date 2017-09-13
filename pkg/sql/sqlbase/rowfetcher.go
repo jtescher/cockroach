@@ -61,6 +61,10 @@ type RowFetcher struct {
 	// The set of ColumnIDs that are required.
 	neededCols util.FastIntSet
 
+	// True if any of the columns contained within the key part of the index
+	// are required.
+	needAnyColsFromKey bool
+
 	// Map used to get the index for columns in cols.
 	colIdxMap map[ColumnID]int
 
@@ -148,6 +152,9 @@ func (rf *RowFetcher) Init(
 	rf.indexColIdx = make([]int, len(indexColumnIDs))
 	for i, id := range indexColumnIDs {
 		rf.indexColIdx[i] = rf.colIdxMap[id]
+		if rf.neededCols.Contains(uint32(id)) {
+			rf.needAnyColsFromKey = true
+		}
 	}
 
 	if isSecondaryIndex {
@@ -233,14 +240,21 @@ func (rf *RowFetcher) NextKey(ctx context.Context) (rowDone bool, err error) {
 			return true, nil
 		}
 
-		rf.keyRemainingBytes, ok, err = rf.ReadIndexKey(rf.kv.Key)
-		if err != nil {
-			return false, err
-		}
-		if !ok {
-			// The key did not match the descriptor, which means it's
-			// interleaved data from some other table or index.
-			continue
+		// If there are interleaves, we need to read the index key in order to
+		// determine whether this row is actually part of the index we're scanning.
+		// If we need to return values for any of the columns that the index key
+		// contains, we also have to read the index key to get those values.
+		// Otherwise, we can completely avoid decoding the index key.
+		if len(rf.index.Interleave.Ancestors) > 0 || rf.needAnyColsFromKey {
+			rf.keyRemainingBytes, ok, err = rf.ReadIndexKey(rf.kv.Key)
+			if err != nil {
+				return false, err
+			}
+			if !ok {
+				// The key did not match the descriptor, which means it's
+				// interleaved data from some other table or index.
+				continue
+			}
 		}
 
 		// For unique secondary indexes, the index-key does not distinguish one row
